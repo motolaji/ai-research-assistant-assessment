@@ -19,10 +19,10 @@ class Settings(BaseSettings):
     openai_model_name: str = "gpt-4.1-mini"
 
     # Data
-    base_dir: Path = Path(__file__).resolve().parent
-    data_dir: Path = base_dir / "data"
-    raw_data_dir: Path = data_dir / "raw"
-    processed_data_dir: Path = data_dir / "processed"
+    base_dir: Path = Path(__file__).parent.parent
+    data_dir: Path = base_dir / "mock-data"
+    # raw_data_dir: Path = data_dir / "raw"
+    # processed_data_dir: Path = data_dir / "processed"
     logs_dir: Path = base_dir / "logs"
 
     # Governance

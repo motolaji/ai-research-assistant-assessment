@@ -8,3 +8,4 @@ openai
 pytest
 httpx
 python-dotenv
+pydantic-settings
