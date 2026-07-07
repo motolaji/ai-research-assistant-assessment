@@ -1,0 +1,10 @@
+fastapi, 
+uvicorn, 
+anthropic, 
+pydantic, 
+mcp, 
+langfuse, 
+openai,
+pytest, 
+httpx, 
+python-dotenv
