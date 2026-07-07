@@ -1,10 +1,11 @@
 import re
 import time
 import json
-from sys_prompt import SYSTEM_PROMPT
-from data_store import DataStore
-from governance import GovernanceContext, PolicyChain
-from tool_schemas import TOOL_SCHEMAS, dispatch_tool
+from app.sys_prompt import SYSTEM_PROMPT
+from app.data_store import DataStore
+from app.governance import PolicyChain
+from app.tool_schemas import TOOL_SCHEMAS
+from app.mcp_server import dispatch_tool
 
 
 ID_PATTERN = re.compile(r"\b(PRJ\d+|DS\d+)\b")
@@ -35,21 +36,21 @@ class AnthropicProvider(LLMProvider):
             tools=tools,
             messages=messages,
         )
-    
-    class OpenAIProvider(LLMProvider):
-        def __init__(self, client, model: str):
-            self.client = client
-            self.model = model
 
-        def call(self, messages: list, tools: list):
-            return self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=1024,
-                temperature=0,
-                system=SYSTEM_PROMPT,
-                tools=tools,
-                messages=messages,
-            )    
+
+class OpenAIProvider(LLMProvider):
+    def __init__(self, client, model: str):
+        self.client = client
+        self.model = model
+
+    def call(self, messages: list, tools: list):
+        return self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=1024,
+            temperature=0,
+            tools=tools,
+            messages=messages,
+        )  
 
 
 
