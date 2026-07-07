@@ -33,7 +33,7 @@ def get_researcher(store: DataStore, username: str | None = None, role: str | No
         results = store.search_researchers(role=role)
         return {"researchers": results, "count": len(results)}
     
-def execute_query(store: DataStore, chain: PolicyChain, dataset_id: str, researcher: dict | None, trace_id: str) -> dict:
+def execute_query(store, chain, dataset_id, researcher, trace_id) -> dict:
     dataset = store.get_dataset_by_id(dataset_id)
     if dataset is None:
         return {"error": "Dataset not found"}
@@ -49,7 +49,9 @@ def execute_query(store: DataStore, chain: PolicyChain, dataset_id: str, researc
         researcher=researcher,
         trace_id=trace_id,
     )
-    return chain.apply(raw_result, context)    
+    governed_result = chain.apply(raw_result, context)
+    governed_result["_policies_fired"] = context.policies_fired
+    return governed_result   
 
 # dispatcher function for agent py
 
