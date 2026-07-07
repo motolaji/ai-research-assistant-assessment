@@ -14,9 +14,11 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    # Models
+    # Models api keys and names
     anthropic_model_name: str = "claude-sonnet-4-6"
+    anthropic_api_key: str
     openai_model_name: str = "gpt-4.1-mini"
+    openai_api_key: str | None = None
 
     # Data
     base_dir: Path = Path(__file__).parent.parent

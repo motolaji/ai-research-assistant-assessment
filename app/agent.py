@@ -1,4 +1,3 @@
-import re
 import time
 import json
 from app.sys_prompt import SYSTEM_PROMPT
@@ -8,13 +7,30 @@ from app.tool_schemas import TOOL_SCHEMAS
 from app.mcp_server import dispatch_tool
 
 
-ID_PATTERN = re.compile(r"\b(PRJ\d+|DS\d+)\b")
 
 def extract_sources(result: dict, sources: list[str]) -> None:
-    text_blob = json.dumps(result)
-    for match in ID_PATTERN.findall(text_blob):
-        if match not in sources:
-            sources.append(match)
+    items = []
+    if "project" in result:
+        items = [result["project"]]
+    elif "projects" in result:
+        items = result["projects"]
+    elif "dataset" in result:
+        items = [result["dataset"]]
+    elif "datasets" in result:
+        items = result["datasets"]
+    elif "researcher" in result:
+        items = [result["researcher"]]
+    elif "researchers" in result:
+        items = result["researchers"]
+
+    for item in items:
+        entity_id = item.get("id") or item.get("username")
+        if entity_id and entity_id not in sources:
+            sources.append(entity_id)
+
+    dataset_id = result.get("dataset_id")
+    if dataset_id and dataset_id not in sources:
+        sources.append(dataset_id)
             
 
 class LLMProvider:
