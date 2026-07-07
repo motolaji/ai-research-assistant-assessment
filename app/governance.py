@@ -1,6 +1,8 @@
 from app.config import settings
 from dataclasses import dataclass, field
 
+from app.data_store import DataStore
+
 
 @dataclass
 class GovernanceContext:
@@ -52,3 +54,66 @@ class PolicyChain:
                 if result.get("denied"):
                     break   # access denied, stop processing
         return result    
+    
+
+class RoleBasedAccessPolicy(GovernancePolicy):
+    name = "role_based_access"
+
+    def applies_to(self, context: GovernanceContext) -> bool:
+        return context.tool_name == "execute_query"
+
+    def apply(self, result: dict, context: GovernanceContext) -> dict:
+        dataset = context.dataset
+        if dataset is None or not dataset.get("restricted", False):
+            return result                      # nothing to enforce
+
+        researcher = context.researcher
+        if researcher is not None and researcher.get("role", "").lower() == "administrator":
+            context.policies_fired.append(self.name)   # audit bypass
+            return result                      # admin allowed
+
+        context.policies_fired.append(self.name)
+        return {                               # deny
+            "denied": True,
+            "reason": "Access denied: this dataset is restricted and requires administrator access.",
+            "dataset_id": context.args.get("dataset_id"),
+        }
+
+class ProjectAccessPolicy(GovernancePolicy):
+    name = "project_access"
+
+    def __init__(self, store: DataStore):
+        self.store = store
+
+    def applies_to(self, context: GovernanceContext) -> bool:
+        return context.tool_name == "execute_query" and context.researcher is not None
+
+    def apply(self, result: dict, context: GovernanceContext) -> dict:
+        researcher = context.researcher
+        role = researcher.get("role", "").lower()
+
+        if role == "administrator":
+            return result  # admins bypass project-level checks
+
+        dataset_id = context.args.get("dataset_id")
+        owning_projects = {p["id"] for p in self.store.projects_for_dataset(dataset_id)}
+        researcher_projects = set(researcher.get("projects", []))
+
+        if owning_projects & researcher_projects:
+            return result  # overlap exists, researcher is assigned to a project using this dataset
+
+        context.policies_fired.append(self.name)
+        return {
+            "denied": True,
+            "reason": (
+                f"Access denied: you are not assigned to any project that uses dataset {dataset_id}."
+            ),
+            "dataset_id": dataset_id,
+        }
+    
+def build_policy_chain(store: DataStore) -> PolicyChain:
+    return PolicyChain([
+        RoleBasedAccessPolicy(),
+        ProjectAccessPolicy(store),
+        SmallCellSuppressionPolicy(),
+    ])    
