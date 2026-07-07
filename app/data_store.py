@@ -6,14 +6,6 @@ class DataStore:
     """
     A simple in-memory data store for storing and retrieving data. (switch to a database later)
     """
-
-    #Load json data from file
-    def _load(self,filename: str):
-        path = self.data_dir / filename
-        if not path.exists():
-            raise FileNotFoundError(f" Required File {filename} not found in data directory.")
-        with open(path, encoding="utf-8",) as f:
-            return json.load(f)
         
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
@@ -24,11 +16,19 @@ class DataStore:
         self.researchers = self._load("researchers.json")
         self.query_results = self._load("sample_query_results.json")
 
-        # indexing by id  .. o1 
+        # Index built once at startup ... O(1) id lookups.
 
         self.projects_by_id = {p["id"]: p for p in self.projects}
         self.datasets_by_id = {d["id"]: d for d in self.datasets}
         self.researchers_by_username = {r["username"]: r for r in self.researchers}
+
+    #Load json data from file
+    def _load(self,filename: str):
+        path = self.data_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f" Required File {filename} not found in data directory.")
+        with open(path, encoding="utf-8",) as f:
+            return json.load(f)    
 
     def get_project_by_id(self, project_id: str) -> dict | None:
         return self.projects_by_id.get(project_id.strip().upper())
@@ -80,7 +80,8 @@ class DataStore:
             results = [d for d in results if d["restricted"] == restricted]
 
         if min_records is not None:
-            results = [d for d in results if d["num_records"] >= min_records]
+            results = [d for d in results if d["records"] >= min_records]
+            
 
         return results
     
