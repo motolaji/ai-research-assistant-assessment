@@ -1,1 +1,5 @@
-.env, logs/, pycache/, *.db, .pytest_cache/
+.env
+logs/
+__pycache__/
+*.db
+.pytest_cache/
