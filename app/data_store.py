@@ -80,7 +80,7 @@ class DataStore:
             results = [d for d in results if d["restricted"] == restricted]
 
         if min_records is not None:
-            results = [d for d in results if d["records"] >= min_records]
+            results = [d for d in results if d["records"] > min_records]
             
 
         return results
