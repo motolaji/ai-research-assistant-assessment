@@ -9,6 +9,16 @@ from app.mcp_server import dispatch_tool
 
 
 def extract_sources(result: dict, sources: list[str]) -> None:
+    if "username" in result and "role" in result:
+        if result["username"] not in sources:
+            sources.append(result["username"])
+        return
+
+    if "id" in result:
+        if result["id"] not in sources:
+            sources.append(result["id"])
+        return
+
     items = []
     if "project" in result:
         items = [result["project"]]
@@ -24,6 +34,8 @@ def extract_sources(result: dict, sources: list[str]) -> None:
         items = result["researchers"]
 
     for item in items:
+        if isinstance(item, str):
+            continue
         entity_id = item.get("id") or item.get("username")
         if entity_id and entity_id not in sources:
             sources.append(entity_id)
@@ -97,6 +109,9 @@ class ResearchAgent:
             for block in response.content:
                 if block.type != "tool_use":
                     continue
+                #print(f"[DEBUG] tool={block.name} args={block.input}") # debugging
+
+                start = time.perf_counter()
 
                 start = time.perf_counter()
                 result = dispatch_tool(
@@ -117,6 +132,8 @@ class ResearchAgent:
                 )
 
                 extract_sources(result, sources)
+
+                #print(f"[DEBUG] result={result} sources_so_far={sources}") # debugging
 
                 tool_results.append({
                     "type": "tool_result",

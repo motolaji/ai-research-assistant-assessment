@@ -68,7 +68,7 @@ class RoleBasedAccessPolicy(GovernancePolicy):
             return result                      # nothing to enforce
 
         researcher = context.researcher
-        if researcher is not None and researcher.get("role", "").lower() == "administrator":
+        if researcher is not None and "administrator" in researcher.get("role", "").lower():
             context.policies_fired.append(self.name)   # audit bypass
             return result                      # admin allowed
 
@@ -92,7 +92,7 @@ class ProjectAccessPolicy(GovernancePolicy):
         researcher = context.researcher
         role = researcher.get("role", "").lower()
 
-        if role == "administrator":
+        if "administrator" in role:
             return result  # admins bypass project-level checks
 
         dataset_id = context.args.get("dataset_id")

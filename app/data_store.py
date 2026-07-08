@@ -87,10 +87,8 @@ class DataStore:
     
     def search_researchers(self, role: str | None = None) -> list[dict]:
         results = self.researchers
-
         if role is not None:
-            results = [r for r in results if r["role"].lower() == role.lower()]
-
+            results = [r for r in results if role.lower() in r["role"].lower()]
         return results
 
 
