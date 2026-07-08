@@ -1,6 +1,6 @@
 # NHS AI Research Assistant
 
-A lightweight AI Research Assistant for a regional NHS Research and Analytics Platform, built for the AI Engineer (Band 8a) take-home technical assessment.
+A lightweight AI Research Assistant for a regional NHS Research and Analytics Platform.
 
 Researchers ask natural language questions. An AI agent answers them by calling MCP tools, never by touching the underlying data directly. Every analytical result passes through a governance policy chain before it reaches the researcher, and every request is fully audited.
 
