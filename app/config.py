@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     openai_model_name: str = "gpt-4.1-mini"
     openai_api_key: str | None = None
 
+
+    #Langfuse
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str = "https://cloud.langfuse.com"
+
     # Data
     base_dir: Path = Path(__file__).parent.parent
     data_dir: Path = base_dir / "mock-data"
