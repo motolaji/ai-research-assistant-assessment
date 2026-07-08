@@ -8,7 +8,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY mock-data ./mock-data
 
-RUN useradd --create-home appuser
+RUN mkdir -p /app/logs && \
+    useradd --create-home appuser && \
+    chown -R appuser:appuser /app
+
 USER appuser
 
 EXPOSE 8000
