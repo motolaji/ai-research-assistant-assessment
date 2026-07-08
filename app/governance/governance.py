@@ -1,7 +1,7 @@
 from app.config import settings
 from dataclasses import dataclass, field
 
-from app.data_store import DataStore
+from app.datastore import DataStore
 
 
 @dataclass

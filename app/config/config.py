@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
 
     # Data
-    base_dir: Path = Path(__file__).parent.parent
+    base_dir: Path = Path(__file__).resolve().parent.parent.parent
     data_dir: Path = base_dir / "mock-data"
     # raw_data_dir: Path = data_dir / "raw"
     # processed_data_dir: Path = data_dir / "processed"

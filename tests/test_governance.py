@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from app.data_store import DataStore
+from app.datastore import DataStore
 from app.governance import (
     GovernanceContext,
     SmallCellSuppressionPolicy,

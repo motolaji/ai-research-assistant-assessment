@@ -1,7 +1,7 @@
 from app.config import settings
 
 try:
-    from langfuse import get_client
+    from langfuse import Langfuse
     _LANGFUSE_AVAILABLE = True
 except ImportError:
     _LANGFUSE_AVAILABLE = False
@@ -10,8 +10,12 @@ except ImportError:
 class Tracer:
     """Wraps Langfuse tracing (SDK v4). Silently no-ops if keys are absent
     or the package isn't installed, so the app runs identically with or
-    without it. get_client() reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
-    / LANGFUSE_HOST from the environment automatically."""
+    without it.
+
+    Credentials are passed explicitly rather than relying on get_client()'s
+    environment-variable auto-detection: pydantic-settings reads .env into
+    the Settings object directly without populating os.environ, so the SDK's
+    own env-var lookup never sees the keys even when settings has them."""
 
     def __init__(self):
         self.enabled = bool(
@@ -19,7 +23,13 @@ class Tracer:
             and settings.langfuse_public_key
             and settings.langfuse_secret_key
         )
-        self._client = get_client() if self.enabled else None
+        self._client = None
+        if self.enabled:
+            self._client = Langfuse(
+                public_key=settings.langfuse_public_key,
+                secret_key=settings.langfuse_secret_key,
+                base_url=settings.langfuse_host,
+            )
 
     def start_trace(self, trace_id: str, question: str, researcher: str | None):
         if not self.enabled:

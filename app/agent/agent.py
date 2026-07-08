@@ -2,7 +2,7 @@ import time
 import json
 
 from app.sys_prompt import SYSTEM_PROMPT
-from app.data_store import DataStore
+from app.datastore import DataStore
 from app.governance import PolicyChain
 from app.tool_schemas import TOOL_SCHEMAS
 from app.mcp_server import dispatch_tool

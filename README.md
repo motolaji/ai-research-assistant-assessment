@@ -2,196 +2,816 @@
 
 A lightweight AI Research Assistant for a regional NHS Research and Analytics Platform.
 
-Researchers ask natural language questions. An AI agent answers them by calling MCP tools, never by touching the underlying data directly. Every analytical result passes through a governance policy chain before it reaches the researcher, and every request is fully audited.
+Researchers ask natural language questions about approved research projects, available datasets, and permitted analytical queries. The assistant answers by using MCP-style tools exposed by the platform, rather than directly accessing the underlying data. Every analytical result passes through a governance policy chain before it reaches the user, and every request is auditable end to end.
 
-## Architecture Overview
+This project was built as a technical assessment for an AI Engineer role. The focus is not only whether the assistant can answer questions, but whether the design is safe, explainable, testable, and suitable for a governed NHS-style research environment.
 
-The system is organised into five layers. Each layer only talks to the layer directly below it.
+---
 
+## Contents
+
+- [NHS AI Research Assistant](#nhs-ai-research-assistant)
+  - [Contents](#contents)
+  - [System Summary](#system-summary)
+  - [Architecture](#architecture)
+    - [Architectural intent](#architectural-intent)
+  - [Request Flow](#request-flow)
+  - [Core Capabilities](#core-capabilities)
+  - [MCP Tool Surface](#mcp-tool-surface)
+  - [Governance and Safety](#governance-and-safety)
+    - [Policy ordering](#policy-ordering)
+    - [Small-cell suppression](#small-cell-suppression)
+    - [Guardrails](#guardrails)
+  - [Identity, Authorisation and RBAC](#identity-authorisation-and-rbac)
+    - [Role-based access](#role-based-access)
+    - [Project-level access](#project-level-access)
+    - [Production authentication path](#production-authentication-path)
+  - [Observability and Audit](#observability-and-audit)
+    - [1. Audit log](#1-audit-log)
+    - [2. Langfuse tracing](#2-langfuse-tracing)
+  - [Response Persistence](#response-persistence)
+  - [Why a Single Agent](#why-a-single-agent)
+  - [Why Not LangChain](#why-not-langchain)
+  - [Why Not RAG](#why-not-rag)
+    - [Scaling path](#scaling-path)
+  - [Technology Choices](#technology-choices)
+  - [Running Locally](#running-locally)
+    - [1. Create a virtual environment](#1-create-a-virtual-environment)
+    - [2. Install dependencies](#2-install-dependencies)
+    - [3. Configure environment variables](#3-configure-environment-variables)
+    - [4. Start the API](#4-start-the-api)
+  - [Running with Docker](#running-with-docker)
+  - [API Usage](#api-usage)
+    - [Ask a question](#ask-a-question)
+    - [Ask a question with researcher identity](#ask-a-question-with-researcher-identity)
+    - [List recent responses](#list-recent-responses)
+    - [Retrieve a response by trace ID](#retrieve-a-response-by-trace-id)
+  - [Testing and Evaluation](#testing-and-evaluation)
+  - [Project Structure](#project-structure)
+  - [Assumptions](#assumptions)
+  - [Known Limitations](#known-limitations)
+  - [Future Improvements](#future-improvements)
+  - [Assessment Design Notes](#assessment-design-notes)
+
+---
+
+## System Summary
+
+The assistant follows a simple principle:
+
+> The LLM may reason about what to do, but it cannot bypass platform tools, governance rules, or audit logging.
+
+A researcher submits a natural language question to the API. The agent decides which approved tool to call, receives structured tool results, and then writes a grounded final answer. Analytical outputs are passed through a governance chain that enforces access control and small-cell suppression before the model can use them.
+
+The response returned to the user always contains:
+
+```json
+{
+  "answer": "A grounded answer based on governed tool results.",
+  "sources": ["DS001", "PRJ003"],
+  "trace_id": "uuid"
+}
 ```
-Researcher
-   |
-   v
-[API layer]        FastAPI: POST /query, GET /health, GET /queries, GET /queries/{trace_id}
-   |
-   v
-[Agent layer]      Claude tool-use loop: decides which tools to call, in what order,
-   |                and synthesises the final answer from tool results
-   v
-[MCP layer]        Six tools exposing platform capabilities. The agent never
-   |                bypasses this layer to touch data directly.
-   v
-[Governance layer] Policy chain: RoleBasedAccess -> ProjectAccess -> SmallCellSuppression
-   |                Access decisions run first, content protection runs last.
-   v
-[Data layer]       Ingestion + repository pattern over the mock JSON files.
-                    Audit log (JSONL) and response store (SQLite) as the two
-                    persisted sources of truth.
+
+The `trace_id` is generated once per request and carried through the API, agent, MCP tools, governance layer, audit log, Langfuse trace, and response store.
+
+---
+
+## Architecture
+
+The system is organised into five main layers, with observability and audit running across all of them.
+
+```mermaid
+flowchart TB
+    researcher["Researcher / API Consumer"]
+
+    subgraph api["1. API Layer - FastAPI"]
+        postQuery["POST /query"]
+        health["GET /health"]
+        queryHistory["GET /queries<br/>GET /queries/{trace_id}"]
+        validation["Input validation<br/>identity resolution<br/>trace_id generation"]
+    end
+
+    subgraph agent["2. Agent Layer"]
+        llm["Claude tool-use loop"]
+        prompt["System prompt<br/>answer only from tool results"]
+        sourceExtraction["Mechanical source extraction"]
+        iterationCap["Tool iteration cap"]
+    end
+
+    subgraph mcp["3. MCP Tool Layer"]
+        discoverProjects["discover_projects"]
+        getProject["get_project"]
+        searchDatasets["search_datasets"]
+        getDataset["get_dataset_metadata"]
+        executeQuery["execute_query"]
+        getResearcher["get_researcher"]
+        allowlist["Tool allowlist + argument validation"]
+    end
+
+    subgraph governance["4. Governance Layer"]
+        rbac["RoleBasedAccessPolicy"]
+        projectAccess["ProjectAccessPolicy"]
+        suppression["SmallCellSuppressionPolicy"]
+        policyChain["PolicyChain"]
+    end
+
+    subgraph data["5. Data Layer"]
+        repository["DataStore repository"]
+        jsonFiles["Mock JSON data"]
+        sqlite["SQLite response store"]
+        auditFile["Append-only JSONL audit log"]
+    end
+
+    subgraph obs["Cross-cutting Observability"]
+        audit["AuditEntry"]
+        langfuse["Langfuse trace/spans<br/>optional graceful degradation"]
+    end
+
+    researcher --> postQuery
+    postQuery --> validation
+    validation --> llm
+    llm --> prompt
+    llm --> allowlist
+    allowlist --> discoverProjects
+    allowlist --> getProject
+    allowlist --> searchDatasets
+    allowlist --> getDataset
+    allowlist --> executeQuery
+    allowlist --> getResearcher
+
+    discoverProjects --> repository
+    getProject --> repository
+    searchDatasets --> repository
+    getDataset --> repository
+    getResearcher --> repository
+    executeQuery --> policyChain
+
+    policyChain --> rbac
+    policyChain --> projectAccess
+    policyChain --> suppression
+    suppression --> repository
+    projectAccess --> repository
+    rbac --> repository
+
+    repository --> jsonFiles
+    postQuery --> sqlite
+    postQuery --> auditFile
+
+    validation -.-> audit
+    llm -.-> audit
+    allowlist -.-> audit
+    policyChain -.-> audit
+    audit -.-> auditFile
+
+    llm -.-> langfuse
+    allowlist -.-> langfuse
+    policyChain -.-> langfuse
+
+    llm --> sourceExtraction
+    sourceExtraction --> postQuery
 ```
 
-**Cross-cutting: observability.** A `trace_id` is generated once per request and threaded through every layer, the audit log, the Langfuse trace, and the response store, so any answer can be traced end to end.
+### Architectural intent
+
+Each layer has a clear responsibility:
+
+| Layer            | Responsibility                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| API layer        | Request validation, researcher identity resolution, trace generation, response shaping |
+| Agent layer      | Tool selection, multi-step reasoning, final answer synthesis                           |
+| MCP tool layer   | Controlled access to platform capabilities through approved tool contracts             |
+| Governance layer | Enforced policy decisions before sensitive results reach the model or user             |
+| Data layer       | Repository access over mock data, audit persistence, response persistence              |
+| Observability    | Traceability across the full request lifecycle                                         |
+
+The dependency direction is intentionally simple:
+
+```text
+API -> Agent -> MCP Tools -> Governance -> Data
+```
+
+The agent does not open files, query databases, or access raw data directly. It can only ask the MCP layer to perform approved operations.
+
+---
 
 ## Request Flow
 
-1. `POST /query` arrives with a question and an optional `X-Researcher-Id` header.
-2. The API layer validates the input, resolves the researcher identity (if any), and generates a `trace_id`.
-3. The agent sends the question and tool schemas to Claude.
-4. Claude decides which tool(s) to call. Each call is dispatched through an allowlist to the MCP layer.
-5. `execute_query` results pass through the governance policy chain before returning to the agent. Every policy decision is recorded.
-6. Claude synthesises a final answer from the tool results. Sources are extracted mechanically from the returned entities, never asked of the model, so they cannot be hallucinated.
-7. The audit entry is finalised and persisted (JSONL). The response is persisted to the response store (SQLite). A Langfuse trace is closed, if configured.
-8. `{ "answer": ..., "sources": [...], "trace_id": "..." }` is returned.
+Example question:
 
-## Technology Choices
+```text
+Run an analysis on DS002.
+```
 
-| Choice | Reasoning |
-|---|---|
-| Python | Primary language for AI/ML engineering, matches the role. |
-| FastAPI | Async, automatic OpenAPI docs (`/docs`, `/redoc`), standard for Python AI APIs. |
-| Anthropic Claude, native tool use | No heavy agent framework needed; the tool-use loop is fully visible and debuggable, which matters in a governed environment. |
-| MCP Python SDK / tool schema pattern | The correct abstraction per the brief; the platform's capabilities are exposed as tools, not as a bespoke API. |
-| In-memory repository over JSON | Right-sized for synthetic data; the repository pattern means swapping to a real database later touches one module. |
-| SQLite response store | The one genuine write path in this exercise; gives users a retrievable history of their own questions and answers. |
-| JSONL audit log | Append-only, so a crash mid-write can't corrupt prior entries; O(1) per write, unlike rewriting a JSON array on every request. |
-| Langfuse | Named in the person specification; LLM-level tracing alongside the audit log. Verified against a live project, see Observability below. |
+End-to-end flow:
 
-## Single Agent vs Multi Agent
+```mermaid
+sequenceDiagram
+    participant User as Researcher
+    participant API as FastAPI API
+    participant Agent as ResearchAgent
+    participant Claude as Claude
+    participant Tools as MCP Tool Layer
+    participant Gov as Governance Chain
+    participant Data as DataStore
+    participant Audit as Audit / Langfuse / Response Store
 
-**Decision: single agent.**
+    User->>API: POST /query
+    API->>API: Validate question and X-Researcher-Id
+    API->>API: Generate trace_id
+    API->>Audit: Open audit entry
 
-One Claude tool-use loop with access to all six tools. Every evaluation question is single-intent and resolves in at most two or three sequential tool calls. A single agent is easier to trace, audit, and defend line by line, properties that matter more in a governed clinical environment than raw architectural ambition.
+    API->>Agent: run(question, researcher, trace_id)
+    Agent->>Claude: question + system prompt + tool schemas
+    Claude->>Agent: tool_use execute_query(dataset_id="DS002")
 
-A multi-agent design (e.g. a router delegating to specialist sub-agents) was considered and rejected for this exercise: it adds latency, more failure modes, and a harder-to-audit chain of model-to-model handoffs, for zero benefit at this problem size.
+    Agent->>Tools: dispatch_tool("execute_query", args)
+    Tools->>Data: get_dataset_by_id("DS002")
+    Tools->>Data: get_query_results("DS002")
 
-The decision rule applied: agent count should follow workload complexity, not ambition. The governance and audit layers are agent-count agnostic, so a future move to multi-agent would not require reworking either.
+    Tools->>Gov: apply policies
+    Gov->>Gov: access checks first
+    Gov->>Gov: small-cell suppression if count < 5
+    Gov-->>Tools: governed result
 
-## Why Not LangChain
+    Tools-->>Agent: structured tool result
+    Agent->>Audit: record tool call + policies fired
+    Agent->>Claude: governed result
+    Claude-->>Agent: final answer
 
-Deliberately not used. LangChain abstracts away the tool-calling loop, but that loop is exactly what this assessment is testing. Raw Anthropic tool use is about 100 lines (`app/agent.py`), fully debuggable, with no hidden prompt templates or framework machinery sitting between the code and the audit trail. In a Trusted Research Environment, fewer opaque layers means easier assurance: every model interaction is either a raw Claude API call or explicit application logic.
+    Agent-->>API: answer + sources
+    API->>Audit: finalise audit entry
+    API->>Audit: persist JSONL audit record
+    API->>Audit: save response to SQLite
+    API-->>User: answer, sources, trace_id
+```
 
-The `LLMProvider` interface in `app/agent.py` keeps the design open to other providers without adopting a framework: `AnthropicProvider` is the working implementation, `OpenAIProvider` is a documented stub demonstrating the seam. Adding real OpenAI support means implementing one class, not restructuring the agent loop.
+This flow ensures that data protection is not left to the LLM prompt. Governance is enforced in application code.
 
-## RAG: Considered and Rejected
+---
 
-RAG (chunking, embeddings, a vector store) was considered and deliberately not implemented for this platform's data.
+## Core Capabilities
 
-The platform data is small and perfectly structured: exact IDs, exact fields, clean relationships. Direct tool-based retrieval gives exact answers with zero retrieval error. Chunking structured records would replace exact lookups with approximate semantic matches, making retrieval *less* accurate, not more. In a TRE context, deterministic retrieval is also easier to audit and govern than semantic retrieval.
+The assistant can:
 
-**Scaling path, if this platform grew:**
+* Discover approved research projects.
+* Retrieve project metadata.
+* Search datasets by keyword, restriction status, and record count.
+* Retrieve dataset metadata.
+* Execute approved analytical queries against synthetic sample results.
+* Apply governance controls before returning analytical outputs.
+* Resolve researcher identity from the optional `X-Researcher-Id` header.
+* Persist every response for later retrieval.
+* Write an audit record for every request.
+* Optionally send LLM traces and tool spans to Langfuse.
 
-- **Stage 1 (current):** in-memory indexed store behind the repository interface. Right-sized for synthetic data.
-- **Stage 2 (structured growth):** swap the repository internals for Postgres with indexes and full-text search, with zero changes above the repository interface. If the dataset catalogue grew to thousands of entries, add embedding-based semantic search over dataset name/description metadata inside `search_datasets`, short metadata records, not document chunking.
-- **Stage 3 (unstructured content):** if the platform later ingests unstructured content, study protocols, clinical guidelines, ethics documents, RAG with chunking and a vector store becomes the right tool, slotting in behind the same repository interface as a new retrieval path.
+---
 
-A related, deliberately excluded feature: external literature retrieval (e.g. PubMed) was considered, since "research assistant" naturally suggests it. It is not implemented. A Trusted Research Environment is sealed: arbitrary outbound calls from inside the environment violate isolation principles. In a real KARECTL-style deployment this would require an approved egress route or an internally mirrored index, so it is listed under Future Improvements rather than implemented here.
+## MCP Tool Surface
 
-## Governance Design
+The assistant exposes platform capabilities through six tools.
 
-Every `execute_query` result passes through a `PolicyChain` before reaching the agent. Each policy is a small, independent class implementing a two-method interface: `applies_to(context)` and `apply(result, context)`.
+| Tool                   | Purpose                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| `discover_projects`    | Search or list approved research projects                                    |
+| `get_project`          | Retrieve a specific project by ID                                            |
+| `search_datasets`      | Search dataset metadata by keyword, restricted flag, or minimum record count |
+| `get_dataset_metadata` | Retrieve metadata for a specific dataset                                     |
+| `execute_query`        | Run an approved analytical query against a dataset                           |
+| `get_researcher`       | Retrieve researcher details by username or role                              |
+
+All tool calls go through an allowlist. Unknown tools return structured errors rather than raising unhandled exceptions.
+
+Tool arguments are validated at the boundary, and tool failures are returned in clean shapes such as:
+
+```json
+{
+  "error": "Dataset not found"
+}
+```
+
+This keeps the agent loop debuggable and prevents tool failures from crashing the API.
+
+---
+
+## Governance and Safety
+
+Governance is implemented as a policy chain.
 
 ```python
 PolicyChain([
-    RoleBasedAccessPolicy(),     # restricted datasets require administrator access
-    ProjectAccessPolicy(store),  # researchers may only analyse datasets in their assigned projects
-    SmallCellSuppressionPolicy(threshold=5),  # results with fewer than 5 records are suppressed
+    RoleBasedAccessPolicy(),
+    ProjectAccessPolicy(store),
+    SmallCellSuppressionPolicy(threshold=5),
 ])
 ```
 
-**Ordering is deliberate:** access decisions run first, content protection runs last. If a policy denies access, the chain exits early, a denied request never reaches suppression logic, since there is no data left to protect.
+Policies are deliberately small, independent classes. Each policy implements:
 
-**Extensibility, as required by the brief:** adding a new governance rule means writing one new class and adding it to the list above. Nothing else in the system changes. This was proven in practice during development: role-based and project-level access were added after the initial suppression policy with no changes to `PolicyChain`, the MCP layer, or the agent.
+```python
+applies_to(context) -> bool
+apply(result, context) -> result
+```
 
-**Restricted dataset handling** lives inside `RoleBasedAccessPolicy` rather than as a separate policy, since "dataset is restricted and requester is not an administrator" is a single rule. A future enhancement could split discovery-level notices (flagging restricted status when browsing) from analysis-level blocking if that distinction becomes valuable.
+Adding a new governance rule should require:
 
-## Guardrails
+1. One new policy class.
+2. One line registering it in the chain.
+3. Unit tests for the new rule.
 
-Guardrails are enforced in **code**, not in the prompt. The system prompt guides behaviour; the code enforces it, since a prompt can be argued with, a policy chain cannot.
+No agent, API, or tool-layer rewrite should be required.
 
-- **Input:** question length capped, non-empty, treated as untrusted data.
-- **Agent loop:** a tool allowlist (`dispatch_tool`) means the agent can only invoke registered tools; unknown tool names return a clean error rather than raising. A maximum iteration cap (8) prevents runaway tool-calling. Temperature 0 for determinism.
-- **Output:** the governance policy chain has final say over data content, the LLM can be persuaded by a cleverly worded question, the policy chain cannot. Sources are collected mechanically from tool results, never asked of the model, so they cannot be hallucinated.
-- **Failure:** tool errors return structured `{"error": ...}` dicts rather than raising exceptions into the agent loop; a request that hits the iteration cap still returns a clean response and is still audited.
+### Policy ordering
 
-**Prompt injection:** a researcher's question is untrusted input flowing into an LLM with tool access. The defence is depth, not a single filter: the tool allowlist means even a successfully "convinced" model can only call real, registered tools; the governance chain means even a successful tool call cannot bypass suppression or access rules; and the system prompt instructs the model to answer only from tool results and never fabricate data.
+Policy order matters.
 
-## Identity and Access Control
+Access decisions run first. Content protection runs last.
 
-**Authentication vs authorisation.** These are different things, and this system implements only the second. `researchers.json` is an identity and permissions registry (username, role, project assignments), not a credentials store, there are no passwords or tokens. For this exercise, identity is **asserted**, not proven: an optional `X-Researcher-Id` header (e.g. `alice`, `admin`) is validated against `researchers.json` and attached to the request context.
+```text
+RoleBasedAccessPolicy
+        ↓
+ProjectAccessPolicy
+        ↓
+SmallCellSuppressionPolicy
+```
 
-**Without the header**, the assistant behaves normally and all 25 evaluation questions pass unchanged, unrestricted data needs no identity, exactly as a public dataset needs no login to browse.
+This means a denied request exits early before suppression logic runs. If a user is not allowed to analyse a dataset, there is no need to inspect or transform the analytical result.
 
-**With the header**, two governance policies apply role-based and project-level access control:
+### Small-cell suppression
 
-- `RoleBasedAccessPolicy`: administrators (role contains "Administrator") may analyse restricted datasets; researchers may not.
-- `ProjectAccessPolicy`: a researcher may only run analysis on datasets belonging to a project they are assigned to (matched via set intersection between the dataset's owning projects and the researcher's project list). Administrators bypass this check.
+The small-cell suppression policy protects analytical outputs where the record count is below the configured threshold.
 
-Every allow and deny decision is recorded in the audit entry with the identity, policy name, and reason, a full trail of who was denied what and why.
+Default threshold:
 
-**Production path:** the header assertion would be replaced with real authentication (Keycloak or NHS OIDC, matching the K8TRE identity approach), with **zero changes to the governance layer**, since policies consume an identity context object, not a transport-level credential.
+```text
+5
+```
 
-## Observability
+If an `execute_query` result contains a count below the threshold, the result is replaced with a suppression message before returning to the agent.
 
-Two layers, sharing one `trace_id`:
+This matters because the LLM never sees the unsafe detailed result. It only sees the governed result.
 
-1. **Audit log (`logs/audit.jsonl`):** the platform's own compliance record. Always on, no external dependency. One JSON object per line: trace ID, question, researcher, every tool call with arguments, duration, and governance policies fired, total duration, and an answer preview.
-2. **Langfuse:** LLM-level tracing for engineering teams (`app/observability.py`), one span per request with a nested tool observation per tool call. Verified working end to end against a live Langfuse Cloud project: all 25 evaluation questions traced successfully with zero regressions to answer quality or correctness. Wired with **graceful degradation**: if `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` are absent from the environment, tracing is silently skipped and the application behaves identically, also verified by running the full evaluation suite with no Langfuse keys configured. Pinned to SDK v4.13.1 in `requirements.txt`, since the Langfuse Python SDK's manual tracing API changed significantly between major versions during development (`.trace()`/`.span()` in v2 versus `.start_observation()` in v4).
+### Guardrails
 
-A third store, the **response store** (SQLite, `responses.db`), persists every question/answer pair as a user-facing source of truth, retrievable via `GET /queries` and `GET /queries/{trace_id}`, independent of the audit log's operator-facing purpose. The schema includes a nullable `researcher` column, ready for per-researcher history once real authentication exists.
+Guardrails are enforced in code, not only in the prompt.
 
-## Assumptions
+| Area            | Guardrail                                                         |
+| --------------- | ----------------------------------------------------------------- |
+| Input           | Non-empty question validation, maximum question length            |
+| Identity        | Optional researcher header is validated against known researchers |
+| Tool use        | Tool allowlist prevents arbitrary tool invocation                 |
+| Tool arguments  | Pydantic validation at tool boundaries                            |
+| Agent loop      | Maximum tool iteration cap                                        |
+| Model behaviour | Temperature 0 for deterministic responses                         |
+| Output          | Sources extracted mechanically from tool results                  |
+| Governance      | Policy chain has final say before results reach the model         |
+| Audit           | Every request receives a traceable audit record                   |
 
-1. Synthetic data is trusted input; light validation only at ingestion.
-2. No authentication is implemented; identity is asserted via header for demonstration, see Identity and Access Control above.
-3. `execute_query` returns pre-canned results per dataset (from `sample_query_results.json`), not a real query engine.
-4. The small cell suppression threshold is 5, per the brief's example.
-5. "Sources" in the API response are the IDs of entities (projects, datasets, researchers) directly returned by tool calls during the agent's reasoning.
-6. Restricted datasets can be discovered and described by any researcher; only analysis (`execute_query`) is access-controlled.
-7. Case-insensitive substring matching is used for keyword and role searches, so "Administrator" matches the actual data value "Platform Administrator".
+Prompt injection is treated as a real risk. A malicious question may try to convince the model to ignore rules, but the model cannot bypass the allowlist, cannot access data directly, and cannot override the governance policy chain.
 
-## Setup Instructions
+---
 
-### Local
+## Identity, Authorisation and RBAC
+
+This project distinguishes between authentication and authorisation.
+
+Authentication proves who a user is. That is not implemented here.
+
+Authorisation decides what a known user is allowed to do. That is implemented through the governance layer.
+
+For this assessment, identity is asserted using an optional request header:
+
+```http
+X-Researcher-Id: alice
+```
+
+If the header is present, the API validates the username against `researchers.json` and passes the researcher context into the agent and governance layer.
+
+If the header is absent, the assistant still works in demo mode. This allows the original evaluation questions to run without authentication.
+
+If the header contains an unknown researcher, the API returns a clear `400` response.
+
+### Role-based access
+
+`RoleBasedAccessPolicy` applies to analytical queries.
+
+Administrators may analyse restricted datasets. Standard researchers may not analyse restricted datasets unless a future policy allows it.
+
+### Project-level access
+
+`ProjectAccessPolicy` applies resource-level authorisation.
+
+A researcher may only run analysis on datasets linked to projects they are assigned to. Administrators bypass this check.
+
+This models a real TRE-style access pattern: users may be known to the platform, but that does not mean they can analyse every dataset.
+
+### Production authentication path
+
+In production, the `X-Researcher-Id` header would be replaced with real authentication, such as Keycloak or NHS OIDC.
+
+The governance layer would not need to change, because policies consume an identity context object rather than relying on the transport mechanism.
+
+---
+
+## Observability and Audit
+
+Observability is two-layered.
+
+### 1. Audit log
+
+The audit log is the platform’s compliance record.
+
+It is always on and has no external dependency.
+
+Audit entries are written to:
+
+```text
+logs/audit.jsonl
+```
+
+Each line contains one request record, including:
+
+```json
+{
+  "trace_id": "uuid",
+  "timestamp": "2026-07-08T10:15:00+00:00",
+  "question": "Run an analysis on DS002",
+  "researcher": "alice",
+  "tool_calls": [
+    {
+      "tool": "execute_query",
+      "args": {
+        "dataset_id": "DS002"
+      },
+      "duration_ms": 4,
+      "policies_fired": ["SmallCellSuppressionPolicy"]
+    }
+  ],
+  "total_duration_ms": 1240,
+  "errors": [],
+  "answer_preview": "The result has been suppressed..."
+}
+```
+
+JSONL was chosen because it is append-only, simple to inspect, and resilient to partial writes compared with repeatedly rewriting a JSON array.
+
+### 2. Langfuse tracing
+
+Langfuse provides LLM-level observability for engineering teams.
+
+When configured, the app records:
+
+* One trace per request.
+* Spans for tool calls.
+* Shared `trace_id` correlation with the audit log.
+* Model-level timing and tracing metadata where available.
+
+Langfuse is optional. If Langfuse keys are not configured, tracing is skipped and the application continues to run normally.
+
+This graceful degradation is important for local development, automated tests, and secure environments where external observability services may not be available.
+
+---
+
+## Response Persistence
+
+In addition to the audit log, the system stores user-facing responses in SQLite.
+
+Database file:
+
+```text
+responses.db
+```
+
+The response store is separate from the audit log.
+
+| Store                 | Purpose                                    | Audience                |
+| --------------------- | ------------------------------------------ | ----------------------- |
+| Audit JSONL           | Compliance, debugging, policy traceability | Operators and engineers |
+| SQLite response store | Retrieval of past question/answer pairs    | Users and API consumers |
+
+Response history is available through:
+
+```http
+GET /queries
+GET /queries/{trace_id}
+```
+
+Each saved response includes:
+
+* Trace ID
+* Original question
+* Final answer
+* Sources
+* Researcher ID, if supplied
+* Timestamp
+
+---
+
+## Why a Single Agent
+
+This project uses one agent.
+
+That decision is intentional.
+
+The assessment questions are single-intent and usually require one to three sequential tool calls. A single Claude tool-use loop is easier to inspect, test, and audit than a multi-agent system.
+
+A multi-agent architecture was considered, such as:
+
+* Router agent
+* Projects agent
+* Dataset agent
+* Analysis agent
+
+That design was rejected for this assessment because it would add latency, orchestration complexity, and more failure modes without improving the outcome.
+
+The decision rule is:
+
+> Agent count should follow workload complexity, not ambition.
+
+The governance and audit layers are agent-count agnostic, so the system could move to multiple specialised agents later without reworking the safety model.
+
+---
+
+## Why Not LangChain
+
+LangChain was deliberately not used.
+
+This assessment is testing whether the candidate can build and explain a safe tool-using agent. Abstracting the tool-use loop behind a framework would hide the most important part of the system.
+
+The raw Anthropic tool-use loop is small, explicit, and debuggable. Every model call, tool call, policy decision, and source extraction step is visible in application code.
+
+In a Trusted Research Environment, fewer opaque layers means easier assurance.
+
+The code also defines an `LLMProvider` interface, so the design remains open to other providers without requiring a full agent framework.
+
+---
+
+## Why Not RAG
+
+RAG was considered and deliberately rejected for the current platform data.
+
+The data in this assessment is small, structured, and exact:
+
+* Project IDs
+* Dataset IDs
+* Dataset metadata
+* Researcher records
+* Pre-canned sample query results
+
+For this kind of data, direct tool-based retrieval is more accurate than chunking and embedding records into a vector store.
+
+Chunking structured records would replace exact lookups with approximate semantic retrieval. That would make the system less reliable and harder to audit.
+
+### Scaling path
+
+The system has a staged scaling path:
+
+| Stage                     | Approach                                                              |
+| ------------------------- | --------------------------------------------------------------------- |
+| Current                   | In-memory indexed repository over JSON files                          |
+| Structured growth         | Replace repository internals with Postgres and indexed search         |
+| Larger metadata catalogue | Add semantic search over dataset names and descriptions               |
+| Unstructured documents    | Add full RAG for protocols, ethics documents, and clinical guidelines |
+
+Tool-based retrieval and RAG are not enemies. They solve different grounding problems. This assessment is primarily about governed tool access to structured platform capabilities.
+
+---
+
+## Technology Choices
+
+| Choice           | Reason                                                           |
+| ---------------- | ---------------------------------------------------------------- |
+| Python           | Strong fit for AI engineering and data workflows                 |
+| FastAPI          | Lightweight API framework with automatic OpenAPI docs            |
+| Anthropic Claude | Native tool use and controllable agent loop                      |
+| MCP-style tools  | Clean abstraction for exposing backend capabilities to the agent |
+| Pydantic         | Request and tool argument validation                             |
+| SQLite           | Simple persistent response history for the assessment scope      |
+| JSONL audit log  | Append-only, inspectable compliance record                       |
+| Langfuse         | Optional LLM observability and trace correlation                 |
+| pytest           | Unit testing for repository, tools, and governance               |
+| Docker           | Reproducible local/container execution                           |
+
+---
+
+## Running Locally
+
+### 1. Create a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 2. Install dependencies
 
 ```bash
 python3 -m pip install -r requirements.txt
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY
+```
+
+### 3. Configure environment variables
+
+```bash
+cp .env.example .env
+```
+
+Then add your Anthropic API key:
+
+```env
+ANTHROPIC_API_KEY=your_key_here
+```
+
+Optional Langfuse variables:
+
+```env
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_HOST=
+```
+
+### 4. Start the API
+
+```bash
 uvicorn app.main:app --reload
 ```
 
-Interactive API docs: `http://localhost:8000/docs`
+The API will be available at:
 
-### Docker
+```text
+http://localhost:8000
+```
+
+Interactive API docs:
+
+```text
+http://localhost:8000/docs
+```
+
+---
+
+## Running with Docker
 
 ```bash
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY
+cp .env.example .env
 docker compose up --build
 ```
 
-### Running tests and the evaluation harness
+Health check:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+## API Usage
+
+### Ask a question
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Which datasets are available for diabetes research?"}'
+```
+
+### Ask a question with researcher identity
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -H "X-Researcher-Id: alice" \
+  -d '{"question": "Run an analysis on DS005."}'
+```
+
+### List recent responses
+
+```bash
+curl http://localhost:8000/queries
+```
+
+### Retrieve a response by trace ID
+
+```bash
+curl http://localhost:8000/queries/{trace_id}
+```
+
+---
+
+## Testing and Evaluation
+
+Run unit tests:
 
 ```bash
 python3 -m pytest tests/ -v
-python3 run_evals.py   # requires the app running locally on :8000
 ```
 
-### CI
+Run the evaluation harness:
 
-A GitHub Actions workflow (`.github/workflows/ci.yml`) runs the unit test suite on every push and pull request to `main`.
+```bash
+python3 run_evals.py
+```
+
+The evaluation harness expects the app to be running locally on port `8000`.
+
+```bash
+uvicorn app.main:app --reload
+python3 run_evals.py
+```
+
+The intended validation strategy is:
+
+1. Unit tests for repository lookups and filters.
+2. Unit tests for governance policies.
+3. Tool tests for clean error shapes and validation.
+4. Evaluation run across all supplied assessment questions.
+5. Repeat evaluation runs to check answer stability.
+
+---
+
+## Project Structure
+
+```text
+.
+├── app
+│   ├── agent.py              # Claude tool-use loop and source extraction
+│   ├── audit.py              # Audit entry model and JSONL persistence
+│   ├── config.py             # Environment and settings
+│   ├── data_store.py         # Repository over mock JSON data
+│   ├── governance.py         # Policy chain and governance policies
+│   ├── main.py               # FastAPI application and routes
+│   ├── mcp_server.py         # Tool schemas, implementations, dispatch allowlist
+│   ├── observability.py      # Optional Langfuse integration
+│   └── response_store.py     # SQLite response persistence
+├── mock-data                 # Synthetic projects, datasets, researchers and results
+├── tests                     # Unit tests
+├── logs                      # Runtime audit logs, ignored by git
+├── run_evals.py              # Evaluation harness
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Assumptions
+
+1. Synthetic data is trusted input, with light validation at ingestion.
+2. The project implements authorisation, not production authentication.
+3. `X-Researcher-Id` is an asserted identity for demonstration.
+4. `execute_query` returns pre-canned sample results rather than running a real query engine.
+5. Small-cell suppression threshold is `5`.
+6. Sources are IDs of projects, datasets, or researchers returned by tools.
+7. Restricted datasets may be discovered, but analysis is governed.
+8. The current JSON-backed repository is sufficient for the supplied assessment data.
+
+---
 
 ## Known Limitations
 
-- Single-instance design: the audit log and response store use file/SQLite writes with a basic lock, sufficient for this exercise but not for horizontally scaled deployment.
-- No authentication, identity is asserted via header, not verified.
-- `search_datasets` and `search_projects` use substring keyword matching; a much larger catalogue would benefit from the semantic search step described in the RAG scaling story.
-- The evaluation harness checks that all 25 questions return a 200 response with plausible content; it does not yet assert exact expected values automatically.
-- `OpenAIProvider` is a structural stub, not a tested second provider.
-- The Langfuse Python SDK's tracing API changed between major versions (v2's `.trace()`/`.span()` vs v4's `.start_observation()`); the integration is pinned and tested against v4.13.1 specifically.
+* Authentication is not implemented; identity is asserted through a request header.
+* The audit log and SQLite response store are suitable for a single-instance assessment app, not horizontally scaled production.
+* Dataset and project search use simple case-insensitive matching.
+* The evaluation harness checks response success and plausibility rather than exact semantic equivalence.
+* The OpenAI provider seam is architectural rather than a fully tested second provider.
+* The MCP layer is implemented in-process for simplicity, while preserving the tool abstraction expected by the brief.
+* No external literature retrieval is implemented.
+
+---
 
 ## Future Improvements
 
-- Replace header-based identity assertion with real authentication (Keycloak or NHS OIDC), no governance layer changes required.
-- Discovery-level restricted notices as a distinct policy from analysis-level blocking.
-- TRE-aware literature retrieval (e.g. PubMed) via an approved egress route or internally mirrored index.
-- Postgres-backed repository for structured data growth; embedding-based semantic search over dataset metadata if the catalogue scales significantly; full RAG if unstructured content (protocols, guidelines) enters the platform.
-- CI: build and push the Docker image to a registry; run the full evaluation harness against a staging deployment using a secrets-managed API key; a CD stage deploying to Kubernetes, mirroring the KARECTL/K8TRE model.
-- Kubernetes manifests for production deployment (Docker and docker-compose are provided; raw K8s manifests were out of scope for this exercise's time budget).
+Potential production improvements include:
+
+* Replace header-based identity assertion with real authentication through Keycloak or NHS OIDC.
+* Move audit and response persistence to a production database.
+* Add distributed tracing and centralised log aggregation.
+* Add Kubernetes deployment manifests and production health checks.
+* Add a proper staging deployment and CI/CD pipeline.
+* Add semantic search over dataset metadata if the catalogue grows.
+* Add full RAG only when unstructured documents enter the platform.
+* Add TRE-aware literature retrieval through an approved egress route or internally mirrored research index.
+* Add discovery-level restricted dataset notices separate from analysis-level blocking.
+* Extend automated evaluation to assert expected answer content, not just successful responses.
+
+---
+
+## Assessment Design Notes
+
+This repository is intentionally small but structured. The aim is to demonstrate:
+
+* Safe tool-using agent design.
+* Clear separation between reasoning, tools, governance, and data.
+* Extensible policy enforcement.
+* Auditability.
+* Deterministic, explainable behaviour.
+* Practical awareness of NHS/TRE constraints.
+* A codebase that can be defended line by line in a technical interview.

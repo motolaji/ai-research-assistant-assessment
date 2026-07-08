@@ -5,7 +5,7 @@ import uuid
 from anthropic import Anthropic
 from app.response_store import init_db, save_response, get_responses, get_response_by_trace
 from app.config import settings
-from app.data_store import DataStore
+from app.datastore import DataStore
 from app.governance import build_policy_chain
 from app.agent import AnthropicProvider, ResearchAgent
 from app.audit import AuditEntry, persist_audit_entry

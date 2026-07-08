@@ -1,5 +1,5 @@
 from pathlib import Path
-from app.data_store import DataStore
+from app.datastore import DataStore
 
 store = DataStore(Path("mock-data"))
 

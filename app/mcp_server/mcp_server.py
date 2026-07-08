@@ -1,4 +1,4 @@
-from app.data_store import DataStore
+from app.datastore import DataStore
 from app.governance import GovernanceContext, PolicyChain
 from app.tool_schemas import TOOL_SCHEMAS
 
@@ -77,4 +77,3 @@ def dispatch_tool(
         return get_researcher(store, **tool_args)
 
     return {"error": f"Unknown tool: {tool_name}"}
-
