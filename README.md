@@ -4,8 +4,6 @@ A lightweight AI Research Assistant for a regional NHS Research and Analytics Pl
 
 Researchers ask natural language questions about approved research projects, available datasets, and permitted analytical queries. The assistant answers by using approved platform tools exposed through a lightweight MCP server and a shared in-process dispatcher, rather than directly accessing the underlying data. Every analytical result passes through a governance policy chain before it reaches the user, and every request is auditable end to end.
 
-This project was built as a technical assessment for an AI Engineer role. The focus is not only whether the assistant can answer questions, but whether the design is safe, explainable, testable, and suitable for a governed NHS-style research environment.
-
 ---
 
 ## Contents
@@ -315,7 +313,9 @@ This keeps the agent loop debuggable and prevents tool failures from crashing th
 
 ## Governance and Safety
 
-Governance is implemented as a policy chain.
+Governance is implemented through a combination of explicit policy enforcement and wider application guardrails.
+
+The policy chain handles decisions that depend on dataset, researcher, project, or analytical-result context. Wider guardrails protect the API, agent loop, tool boundary, output shaping, and audit trail.
 
 ```python
 PolicyChain([
@@ -541,7 +541,7 @@ A multi-agent architecture was considered, such as:
 * Dataset agent
 * Analysis agent
 
-That design was rejected for this assessment because it would add latency, orchestration complexity, and more failure modes without improving the outcome.
+That design was not used for this assessment because it would add latency, orchestration complexity, and more failure modes without improving the outcome.
 
 The decision rule is:
 
@@ -555,11 +555,11 @@ The governance and audit layers are agent-count agnostic, so the system could mo
 
 Agent frameworks such as LangChain were considered but deliberately not used.
 
-This assessment is testing whether the candidate can build and explain a safe tool-using agent. The tool-use loop, tool dispatch, source extraction, policy enforcement, and audit trail are the most important parts of the system. Hiding those behind a framework would make the solution harder to inspect and harder to defend in a technical interview.
+The goal of this implementation is to make the tool-use loop, tool dispatch, source extraction, policy enforcement, and audit trail easy to inspect. Hiding those behaviours behind a framework would make the system harder to reason about and harder to defend technically.
 
 The implementation uses direct provider APIs and a small explicit agent loop instead. Every model call, tool call, policy decision, and source extraction step is visible in application code.
 
-In a Trusted Research Environment, fewer opaque layers means easier assurance. The system favours explicit control flow over framework convenience, because the key requirement is not only that the assistant works, but that every decision can be traced and explained.
+In a Trusted Research Environment, fewer opaque layers means easier assurance. The system favours explicit control flow over framework convenience because every decision should be traceable and explainable.
 
 The code still keeps a provider abstraction, so the design is not locked to a single LLM vendor. Additional providers can be added behind the same interface without introducing a full agent framework.
 
@@ -567,7 +567,7 @@ The code still keeps a provider abstraction, so the design is not locked to a si
 
 ## Why Not RAG
 
-RAG was considered and deliberately rejected for the current platform data.
+RAG was considered and deliberately not used for the current platform data.
 
 The data in this assessment is small, structured, and exact:
 
@@ -592,8 +592,6 @@ The system has a staged scaling path:
 | Larger metadata catalogue | Add semantic search over dataset names and descriptions               |
 | Unstructured documents    | Add full RAG for protocols, ethics documents, and clinical guidelines |
 
-Tool-based retrieval and RAG are not enemies. They solve different grounding problems. This assessment is primarily about governed tool access to structured platform capabilities.
-
 ---
 
 ## Technology Choices
@@ -607,7 +605,7 @@ Tool-based retrieval and RAG are not enemies. They solve different grounding pro
 | Pydantic                       | Request and tool argument validation                                                                            |
 | SQLite                         | Simple persistent response history for the assessment scope                                                     |
 | JSONL audit log                | Append-only, inspectable compliance record                                                                      |
-| Langfuse                       | Optional LLM observability and trace correlation                                                                |
+| Langfuse                       | LLM observability and trace correlation                                                          |
 | pytest                         | Unit testing for repository, tools, and governance                                                              |
 | Docker                         | Reproducible local/container execution                                                                          |
 
