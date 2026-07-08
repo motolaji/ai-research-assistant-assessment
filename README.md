@@ -2,7 +2,7 @@
 
 A lightweight AI Research Assistant for a regional NHS Research and Analytics Platform.
 
-Researchers ask natural language questions about approved research projects, available datasets, and permitted analytical queries. The assistant answers by using MCP-style tools exposed by the platform, rather than directly accessing the underlying data. Every analytical result passes through a governance policy chain before it reaches the user, and every request is auditable end to end.
+Researchers ask natural language questions about approved research projects, available datasets, and permitted analytical queries. The assistant answers by using approved platform tools exposed through a lightweight MCP server and a shared in-process dispatcher, rather than directly accessing the underlying data. Every analytical result passes through a governance policy chain before it reaches the user, and every request is auditable end to end.
 
 This project was built as a technical assessment for an AI Engineer role. The focus is not only whether the assistant can answer questions, but whether the design is safe, explainable, testable, and suitable for a governed NHS-style research environment.
 
@@ -31,7 +31,7 @@ This project was built as a technical assessment for an AI Engineer role. The fo
     - [2. Langfuse tracing](#2-langfuse-tracing)
   - [Response Persistence](#response-persistence)
   - [Why a Single Agent](#why-a-single-agent)
-  - [Why Not LangChain](#why-not-langchain)
+  - [Why Not an Agent Framework](#why-not-an-agent-framework)
   - [Why Not RAG](#why-not-rag)
     - [Scaling path](#scaling-path)
   - [Technology Choices](#technology-choices)
@@ -40,6 +40,7 @@ This project was built as a technical assessment for an AI Engineer role. The fo
     - [2. Install dependencies](#2-install-dependencies)
     - [3. Configure environment variables](#3-configure-environment-variables)
     - [4. Start the API](#4-start-the-api)
+  - [Running the MCP Server](#running-the-mcp-server)
   - [Running with Docker](#running-with-docker)
   - [API Usage](#api-usage)
     - [Ask a question](#ask-a-question)
@@ -48,6 +49,7 @@ This project was built as a technical assessment for an AI Engineer role. The fo
     - [Retrieve a response by trace ID](#retrieve-a-response-by-trace-id)
   - [Testing and Evaluation](#testing-and-evaluation)
   - [Latest Evaluation Result](#latest-evaluation-result)
+  - [Project Structure](#project-structure)
   - [Assumptions](#assumptions)
   - [Known Limitations](#known-limitations)
   - [Future Improvements](#future-improvements)
@@ -99,14 +101,16 @@ flowchart TB
         iterationCap["Tool iteration cap"]
     end
 
-    subgraph mcp["3. MCP Tool Layer"]
+    subgraph mcp["3. MCP Server + Shared Tool Layer"]
+        mcpServer["Standalone MCP server<br/>python -m app.mcp_server.mcp_server"]
+        dispatcher["In-process dispatcher<br/>used by REST assistant"]
+        toolBoundary["MCP tools + allowlisted dispatch"]
         discoverProjects["discover_projects"]
         getProject["get_project"]
         searchDatasets["search_datasets"]
         getDataset["get_dataset_metadata"]
         executeQuery["execute_query"]
         getResearcher["get_researcher"]
-        allowlist["Tool allowlist + argument validation"]
     end
 
     subgraph governance["4. Governance Layer"]
@@ -132,13 +136,16 @@ flowchart TB
     postQuery --> validation
     validation --> llm
     llm --> prompt
-    llm --> allowlist
-    allowlist --> discoverProjects
-    allowlist --> getProject
-    allowlist --> searchDatasets
-    allowlist --> getDataset
-    allowlist --> executeQuery
-    allowlist --> getResearcher
+    llm --> dispatcher
+    mcpServer --> toolBoundary
+    dispatcher --> toolBoundary
+
+    toolBoundary --> discoverProjects
+    toolBoundary --> getProject
+    toolBoundary --> searchDatasets
+    toolBoundary --> getDataset
+    toolBoundary --> executeQuery
+    toolBoundary --> getResearcher
 
     discoverProjects --> repository
     getProject --> repository
@@ -160,12 +167,12 @@ flowchart TB
 
     validation -.-> audit
     llm -.-> audit
-    allowlist -.-> audit
+    toolBoundary -.-> audit
     policyChain -.-> audit
     audit -.-> auditFile
 
     llm -.-> langfuse
-    allowlist -.-> langfuse
+    toolBoundary -.-> langfuse
     policyChain -.-> langfuse
 
     llm --> sourceExtraction
@@ -176,14 +183,14 @@ flowchart TB
 
 Each layer has a clear responsibility:
 
-| Layer            | Responsibility                                                                         |
-| ---------------- | -------------------------------------------------------------------------------------- |
-| API layer        | Request validation, researcher identity resolution, trace generation, response shaping |
-| Agent layer      | Tool selection, multi-step reasoning, final answer synthesis                           |
-| MCP tool layer   | Controlled access to platform capabilities through approved tool contracts             |
-| Governance layer | Enforced policy decisions before sensitive results reach the model or user             |
-| Data layer       | Repository access over mock data, audit persistence, response persistence              |
-| Observability    | Traceability across the full request lifecycle                                         |
+| Layer                          | Responsibility                                                                         |
+| ------------------------------ | -------------------------------------------------------------------------------------- |
+| API layer                      | Request validation, researcher identity resolution, trace generation, response shaping |
+| Agent layer                    | Tool selection, multi-step reasoning, final answer synthesis                           |
+| MCP server + shared tool layer | Controlled access to platform capabilities through approved tool contracts             |
+| Governance layer               | Enforced policy decisions before sensitive results reach the model or user             |
+| Data layer                     | Repository access over mock data, audit persistence, response persistence              |
+| Observability                  | Traceability across the full request lifecycle                                         |
 
 The dependency direction is intentionally simple:
 
@@ -192,6 +199,8 @@ app.main -> app.agent -> app.mcp_server -> app.governance -> app.datastore
 ```
 
 The agent does not open files, query databases, or access raw data directly. It can only ask the MCP layer to perform approved operations.
+
+The standalone MCP server and the REST assistant share the same underlying tool implementations. This avoids two versions of the same platform logic and keeps governance behaviour consistent across both execution paths.
 
 ---
 
@@ -203,7 +212,7 @@ Example question:
 Run an analysis on DS002.
 ```
 
-End-to-end flow:
+End-to-end flow through the REST API:
 
 ```mermaid
 sequenceDiagram
@@ -211,7 +220,7 @@ sequenceDiagram
     participant API as FastAPI API
     participant Agent as ResearchAgent
     participant Claude as Claude
-    participant Tools as MCP Tool Layer
+    participant Tools as MCP Tools / Shared Dispatcher
     participant Gov as Governance Chain
     participant Data as DataStore
     participant Audit as Audit / Langfuse / Response Store
@@ -269,7 +278,9 @@ The assistant can:
 
 ## MCP Tool Surface
 
-The assistant exposes platform capabilities through six tools.
+The project exposes platform capabilities through a lightweight MCP server implemented with the Python MCP SDK. The REST assistant reuses the same underlying tool implementations through an in-process allowlisted dispatcher, so tool behaviour, governance enforcement, and error handling remain consistent across both execution paths.
+
+The platform exposes six tools:
 
 | Tool                   | Purpose                                                                      |
 | ---------------------- | ---------------------------------------------------------------------------- |
@@ -279,6 +290,14 @@ The assistant exposes platform capabilities through six tools.
 | `get_dataset_metadata` | Retrieve metadata for a specific dataset                                     |
 | `execute_query`        | Run an approved analytical query against a dataset                           |
 | `get_researcher`       | Retrieve researcher details by username or role                              |
+
+The standalone MCP server can be started with:
+
+```bash
+python -m app.mcp_server.mcp_server
+```
+
+The FastAPI assistant path does not call raw data directly. It calls the same approved tool functions through `dispatch_tool`, which keeps the system simple to run while preserving the MCP tool boundary required by the assessment.
 
 All tool calls go through an allowlist. Unknown tools return structured errors rather than raising unhandled exceptions.
 
@@ -532,17 +551,17 @@ The governance and audit layers are agent-count agnostic, so the system could mo
 
 ---
 
-## Why Not LangChain
+## Why Not an Agent Framework
 
-LangChain was deliberately not used.
+Agent frameworks such as LangChain were considered but deliberately not used.
 
-This assessment is testing whether the candidate can build and explain a safe tool-using agent. Abstracting the tool-use loop behind a framework would hide the most important part of the system.
+This assessment is testing whether the candidate can build and explain a safe tool-using agent. The tool-use loop, tool dispatch, source extraction, policy enforcement, and audit trail are the most important parts of the system. Hiding those behind a framework would make the solution harder to inspect and harder to defend in a technical interview.
 
-The raw Anthropic tool-use loop is small, explicit, and debuggable. Every model call, tool call, policy decision, and source extraction step is visible in application code.
+The implementation uses direct provider APIs and a small explicit agent loop instead. Every model call, tool call, policy decision, and source extraction step is visible in application code.
 
-In a Trusted Research Environment, fewer opaque layers means easier assurance.
+In a Trusted Research Environment, fewer opaque layers means easier assurance. The system favours explicit control flow over framework convenience, because the key requirement is not only that the assistant works, but that every decision can be traced and explained.
 
-The code also defines an `LLMProvider` interface, so the design remains open to other providers without requiring a full agent framework.
+The code still keeps a provider abstraction, so the design is not locked to a single LLM vendor. Additional providers can be added behind the same interface without introducing a full agent framework.
 
 ---
 
@@ -579,22 +598,24 @@ Tool-based retrieval and RAG are not enemies. They solve different grounding pro
 
 ## Technology Choices
 
-| Choice           | Reason                                                           |
-| ---------------- | ---------------------------------------------------------------- |
-| Python           | Strong fit for AI engineering and data workflows                 |
-| FastAPI          | Lightweight API framework with automatic OpenAPI docs            |
-| Anthropic Claude | Native tool use and controllable agent loop                      |
-| MCP-style tools  | Clean abstraction for exposing backend capabilities to the agent |
-| Pydantic         | Request and tool argument validation                             |
-| SQLite           | Simple persistent response history for the assessment scope      |
-| JSONL audit log  | Append-only, inspectable compliance record                       |
-| Langfuse         | Optional LLM observability and trace correlation                 |
-| pytest           | Unit testing for repository, tools, and governance               |
-| Docker           | Reproducible local/container execution                           |
+| Choice                         | Reason                                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Python                         | Strong fit for AI engineering and data workflows                                                                |
+| FastAPI                        | Lightweight API framework with automatic OpenAPI docs                                                           |
+| Anthropic Claude               | Native tool use and controllable agent loop                                                                     |
+| MCP server + shared tool layer | Exposes backend capabilities through MCP tools while reusing one governed implementation for the REST assistant |
+| Pydantic                       | Request and tool argument validation                                                                            |
+| SQLite                         | Simple persistent response history for the assessment scope                                                     |
+| JSONL audit log                | Append-only, inspectable compliance record                                                                      |
+| Langfuse                       | Optional LLM observability and trace correlation                                                                |
+| pytest                         | Unit testing for repository, tools, and governance                                                              |
+| Docker                         | Reproducible local/container execution                                                                          |
 
 ---
 
 ## Running Locally
+
+This project was built and containerised with Python 3.12.
 
 ### 1. Create a virtual environment
 
@@ -647,6 +668,18 @@ Interactive API docs:
 ```text
 http://localhost:8000/docs
 ```
+
+---
+
+## Running the MCP Server
+
+The project includes a standalone MCP server entrypoint exposing the approved research platform tools.
+
+```bash
+python -m app.mcp_server.mcp_server
+```
+
+The MCP server reuses the same underlying tool functions as the REST assistant. This keeps the implementation small while preserving one source of truth for project discovery, dataset search, metadata lookup, researcher lookup, analytical query execution, and governance enforcement.
 
 ---
 
@@ -735,15 +768,7 @@ uvicorn app.main:app --reload
 python3 run_evals.py
 ```
 
-## Latest Evaluation Result
-
-The evaluation harness was run against the local FastAPI app using the supplied evaluation questions in `mock-data/evaluation_questions.json`.
-
-```bash
-uvicorn app.main:app --reload
-python3 run_evals.py
-
-25/25 returned 200 OK
+The evaluation file covers project discovery, dataset search, metadata lookup, researcher lookup, and governed analytical queries.
 
 The intended validation strategy is:
 
@@ -752,6 +777,25 @@ The intended validation strategy is:
 3. Tool tests for clean error shapes and validation.
 4. Evaluation run across all supplied assessment questions.
 5. Repeat evaluation runs to check answer stability.
+
+---
+
+## Latest Evaluation Result
+
+The evaluation harness was run against the local FastAPI app using the supplied evaluation questions in `mock-data/evaluation_questions.json`.
+
+```bash
+uvicorn app.main:app --reload
+python3 run_evals.py
+```
+
+Latest result:
+
+```text
+25/25 returned 200 OK
+```
+
+This confirms that the assistant can handle the supplied project, dataset, researcher, and analytical-query questions end to end through the API, agent, MCP tool layer, governance chain, and response shaping.
 
 ---
 
@@ -781,7 +825,7 @@ The intended validation strategy is:
 │   │   └── main.py               # FastAPI application and routes
 │   ├── mcp_server
 │   │   ├── __init__.py
-│   │   └── mcp_server.py         # Tool implementations and dispatch allowlist
+│   │   └── mcp_server.py         # MCP server, tool implementations, and dispatch allowlist
 │   ├── observability
 │   │   ├── __init__.py
 │   │   └── observability.py      # Optional Langfuse integration
@@ -821,6 +865,7 @@ The intended validation strategy is:
 6. Sources are IDs of projects, datasets, or researchers returned by tools.
 7. Restricted datasets may be discovered, but analysis is governed.
 8. The current JSON-backed repository is sufficient for the supplied assessment data.
+9. The standalone MCP server and REST assistant share the same tool implementations to avoid duplicate governance and data-access logic.
 
 ---
 
@@ -829,9 +874,9 @@ The intended validation strategy is:
 * Authentication is not implemented; identity is asserted through a request header.
 * The audit log and SQLite response store are suitable for a single-instance assessment app, not horizontally scaled production.
 * Dataset and project search use simple case-insensitive matching.
-* The evaluation harness checks response success and plausibility rather than exact semantic equivalence.
+* The evaluation harness currently checks response success and answer previews; a production-grade evaluator would add semantic assertions for expected content.
 * The OpenAI provider seam is architectural rather than a fully tested second provider.
-* The MCP layer is implemented in-process for simplicity, while preserving the tool abstraction expected by the brief.
+* The standalone MCP server is lightweight and uses the same in-process tool implementations as the REST assistant; a production deployment would run the MCP server as a separately managed service.
 * No external literature retrieval is implemented.
 
 ---
@@ -845,6 +890,7 @@ Potential production improvements include:
 * Add distributed tracing and centralised log aggregation.
 * Add Kubernetes deployment manifests and production health checks.
 * Add a proper staging deployment and CI/CD pipeline.
+* Run the MCP server as a separately deployed service with managed lifecycle, service discovery, and transport-level controls.
 * Add semantic search over dataset metadata if the catalogue grows.
 * Add full RAG only when unstructured documents enter the platform.
 * Add TRE-aware literature retrieval through an approved egress route or internally mirrored research index.
@@ -864,3 +910,5 @@ This repository is intentionally small but structured. The aim is to demonstrate
 * Deterministic, explainable behaviour.
 * Practical awareness of NHS/TRE constraints.
 * A codebase that can be defended line by line in a technical interview.
+
+For a live extension task, the safest change path is: add or update the repository method, expose it through one tool, apply governance if sensitive data is returned, then add a focused unit test and evaluation question.
