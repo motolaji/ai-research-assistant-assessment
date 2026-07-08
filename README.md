@@ -53,7 +53,7 @@ Researcher
 | In-memory repository over JSON | Right-sized for synthetic data; the repository pattern means swapping to a real database later touches one module. |
 | SQLite response store | The one genuine write path in this exercise; gives users a retrievable history of their own questions and answers. |
 | JSONL audit log | Append-only, so a crash mid-write can't corrupt prior entries; O(1) per write, unlike rewriting a JSON array on every request. |
-| Langfuse | Named in the person specification; LLM-level tracing alongside the audit log. Wired with graceful degradation, see Observability below. |
+| Langfuse | Named in the person specification; LLM-level tracing alongside the audit log. Verified against a live project, see Observability below. |
 
 ## Single Agent vs Multi Agent
 
@@ -134,7 +134,7 @@ Every allow and deny decision is recorded in the audit entry with the identity, 
 Two layers, sharing one `trace_id`:
 
 1. **Audit log (`logs/audit.jsonl`):** the platform's own compliance record. Always on, no external dependency. One JSON object per line: trace ID, question, researcher, every tool call with arguments, duration, and governance policies fired, total duration, and an answer preview.
-2. **Langfuse:** LLM-level tracing for engineering teams (`app/observability.py`), one trace per request, one span per tool call. Wired with **graceful degradation**: if `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` are absent from the environment, tracing is silently skipped and the application behaves identically, verified by running the full evaluation suite with no Langfuse keys configured.
+2. **Langfuse:** LLM-level tracing for engineering teams (`app/observability.py`), one span per request with a nested tool observation per tool call. Verified working end to end against a live Langfuse Cloud project: all 25 evaluation questions traced successfully with zero regressions to answer quality or correctness. Wired with **graceful degradation**: if `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` are absent from the environment, tracing is silently skipped and the application behaves identically, also verified by running the full evaluation suite with no Langfuse keys configured. Pinned to SDK v4.13.1 in `requirements.txt`, since the Langfuse Python SDK's manual tracing API changed significantly between major versions during development (`.trace()`/`.span()` in v2 versus `.start_observation()` in v4).
 
 A third store, the **response store** (SQLite, `responses.db`), persists every question/answer pair as a user-facing source of truth, retrievable via `GET /queries` and `GET /queries/{trace_id}`, independent of the audit log's operator-facing purpose. The schema includes a nullable `researcher` column, ready for per-researcher history once real authentication exists.
 
@@ -185,6 +185,7 @@ A GitHub Actions workflow (`.github/workflows/ci.yml`) runs the unit test suite 
 - `search_datasets` and `search_projects` use substring keyword matching; a much larger catalogue would benefit from the semantic search step described in the RAG scaling story.
 - The evaluation harness checks that all 25 questions return a 200 response with plausible content; it does not yet assert exact expected values automatically.
 - `OpenAIProvider` is a structural stub, not a tested second provider.
+- The Langfuse Python SDK's tracing API changed between major versions (v2's `.trace()`/`.span()` vs v4's `.start_observation()`); the integration is pinned and tested against v4.13.1 specifically.
 
 ## Future Improvements
 
