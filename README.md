@@ -47,7 +47,7 @@ This project was built as a technical assessment for an AI Engineer role. The fo
     - [List recent responses](#list-recent-responses)
     - [Retrieve a response by trace ID](#retrieve-a-response-by-trace-id)
   - [Testing and Evaluation](#testing-and-evaluation)
-  - [Project Structure](#project-structure)
+  - [Latest Evaluation Result](#latest-evaluation-result)
   - [Assumptions](#assumptions)
   - [Known Limitations](#known-limitations)
   - [Future Improvements](#future-improvements)
@@ -188,7 +188,7 @@ Each layer has a clear responsibility:
 The dependency direction is intentionally simple:
 
 ```text
-API -> Agent -> MCP Tools -> Governance -> Data
+app.main -> app.agent -> app.mcp_server -> app.governance -> app.datastore
 ```
 
 The agent does not open files, query databases, or access raw data directly. It can only ask the MCP layer to perform approved operations.
@@ -621,12 +621,13 @@ Then add your Anthropic API key:
 ANTHROPIC_API_KEY=your_key_here
 ```
 
-Optional Langfuse variables:
+Optional provider and Langfuse variables:
 
 ```env
+OPENAI_API_KEY=
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
-LANGFUSE_HOST=
+LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
 ### 4. Start the API
@@ -669,6 +670,14 @@ Expected response:
   "status": "ok"
 }
 ```
+
+The Docker entrypoint uses:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+This works with the package-based layout because `app/main/__init__.py` re-exports the FastAPI `app` instance from `app/main/main.py`.
 
 ---
 
@@ -726,6 +735,16 @@ uvicorn app.main:app --reload
 python3 run_evals.py
 ```
 
+## Latest Evaluation Result
+
+The evaluation harness was run against the local FastAPI app using the supplied evaluation questions in `mock-data/evaluation_questions.json`.
+
+```bash
+uvicorn app.main:app --reload
+python3 run_evals.py
+
+25/25 returned 200 OK
+
 The intended validation strategy is:
 
 1. Unit tests for repository lookups and filters.
@@ -741,22 +760,52 @@ The intended validation strategy is:
 ```text
 .
 ├── app
-│   ├── agent.py              # Claude tool-use loop and source extraction
-│   ├── audit.py              # Audit entry model and JSONL persistence
-│   ├── config.py             # Environment and settings
-│   ├── data_store.py         # Repository over mock JSON data
-│   ├── governance.py         # Policy chain and governance policies
-│   ├── main.py               # FastAPI application and routes
-│   ├── mcp_server.py         # Tool schemas, implementations, dispatch allowlist
-│   ├── observability.py      # Optional Langfuse integration
-│   └── response_store.py     # SQLite response persistence
-├── mock-data                 # Synthetic projects, datasets, researchers and results
-├── tests                     # Unit tests
-├── logs                      # Runtime audit logs, ignored by git
-├── run_evals.py              # Evaluation harness
+│   ├── __init__.py
+│   ├── agent
+│   │   ├── __init__.py
+│   │   └── agent.py              # Claude/OpenAI provider seam and research agent loop
+│   ├── audit
+│   │   ├── __init__.py
+│   │   └── audit.py              # Audit entry model and JSONL persistence
+│   ├── config
+│   │   ├── __init__.py
+│   │   └── config.py             # Environment loading and app settings
+│   ├── datastore
+│   │   ├── __init__.py
+│   │   └── data_store.py         # Repository over mock JSON data
+│   ├── governance
+│   │   ├── __init__.py
+│   │   └── governance.py         # Policy chain and governance policies
+│   ├── main
+│   │   ├── __init__.py
+│   │   └── main.py               # FastAPI application and routes
+│   ├── mcp_server
+│   │   ├── __init__.py
+│   │   └── mcp_server.py         # Tool implementations and dispatch allowlist
+│   ├── observability
+│   │   ├── __init__.py
+│   │   └── observability.py      # Optional Langfuse integration
+│   ├── response_store
+│   │   ├── __init__.py
+│   │   └── response_store.py     # SQLite response persistence
+│   ├── sys_prompt
+│   │   ├── __init__.py
+│   │   └── sys_prompt.py         # System prompt construction
+│   └── tool_schemas
+│       ├── __init__.py
+│       └── tool_schemas.py       # Claude/MCP-style tool schema definitions
+├── mock-data
+│   └── evaluation_questions.json # Supplied evaluation questions
+├── tests
+│   ├── test_data_store.py
+│   └── test_governance.py
+├── logs                         # Runtime audit logs, ignored by git
+├── run_evals.py                 # Evaluation harness
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
+├── .env.example
+├── .gitignore
 └── README.md
 ```
 
